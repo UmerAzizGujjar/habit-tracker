@@ -6,6 +6,10 @@ import Footer from "@/components/Footer";
 import api from "@/lib/apiClient";
 import { supabase } from "@/lib/supabaseClient";
 
+function isStrongPassword(value) {
+  return /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(value);
+}
+
 export default function SignupPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
@@ -14,6 +18,11 @@ export default function SignupPage() {
 
   const onSubmit = async (e) => {
     e.preventDefault();
+    if (!isStrongPassword(password)) {
+      toast.error("Password must be at least 8 characters and include a letter, a number, and a special character");
+      return;
+    }
+
     setLoading(true);
     try {
       const { data } = await api.post("/api/auth/signup", { email, password });
@@ -38,7 +47,8 @@ export default function SignupPage() {
       <form className="surface p-8 w-full max-w-md space-y-3" onSubmit={onSubmit}>
         <h1 className="text-2xl font-semibold">Create Account</h1>
         <input className="input" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <input className="input" type="password" minLength={6} placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        <input className="input" type="password" minLength={8} placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        <p className="text-xs text-stone-500">Use at least 8 characters with a letter, a number, and a special character.</p>
         <button className="btn btn-primary w-full" disabled={loading}>{loading ? "Creating..." : "Sign Up"}</button>
         <p className="text-sm text-stone-600">Already have an account? <Link href="/login" className="underline">Login</Link></p>
       </form>

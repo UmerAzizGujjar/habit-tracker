@@ -11,6 +11,8 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resetMode, setResetMode] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -32,6 +34,28 @@ export default function LoginPage() {
     }
   };
 
+  const onResetPassword = async (e) => {
+    e.preventDefault();
+    const targetEmail = email.trim();
+    if (!targetEmail) {
+      toast.error("Enter your email first");
+      return;
+    }
+
+    setResetLoading(true);
+    try {
+      const redirectTo = `${window.location.origin}/reset-password`;
+      const { error } = await supabase.auth.resetPasswordForEmail(targetEmail, { redirectTo });
+      if (error) throw error;
+      toast.success("Password reset link sent to your email");
+      setResetMode(false);
+    } catch (error) {
+      toast.error(error?.message || "Unable to send reset link");
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
   return (
     <>
     <div className="layout-shell min-h-screen grid place-items-center py-10">
@@ -39,6 +63,26 @@ export default function LoginPage() {
         <h1 className="text-2xl font-semibold">Login</h1>
         <input className="input" type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
         <input className="input" type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        <div className="flex items-center justify-between gap-3 text-sm">
+          <button
+            type="button"
+            className="text-stone-600 underline underline-offset-4 hover:text-(--accent-strong)"
+            onClick={() => setResetMode((prev) => !prev)}
+          >
+            Forgot password?
+          </button>
+          <Link href="/signup" className="underline text-stone-600 hover:text-(--accent-strong)">Sign up</Link>
+        </div>
+
+        {resetMode ? (
+          <div className="rounded-2xl border border-stone-200 bg-stone-50/70 p-4 space-y-3">
+            <p className="text-sm text-stone-700">We&apos;ll email you a link to set a new password.</p>
+            <button className="btn btn-primary w-full" type="button" onClick={onResetPassword} disabled={resetLoading}>
+              {resetLoading ? "Sending reset link..." : "Send reset link"}
+            </button>
+          </div>
+        ) : null}
+
         <button className="btn btn-primary w-full" disabled={loading}>{loading ? "Signing in..." : "Login"}</button>
         <p className="text-sm text-stone-600">No account? <Link href="/signup" className="underline">Sign up</Link></p>
       </form>

@@ -13,9 +13,12 @@ create table if not exists habits (
   user_id uuid not null,
   title text not null,
   description text,
+  image_url text,
   frequency text default 'daily',
   created_at timestamptz default now()
 );
+
+alter table if exists habits add column if not exists image_url text;
 
 create table if not exists habit_logs (
   id uuid primary key default gen_random_uuid(),

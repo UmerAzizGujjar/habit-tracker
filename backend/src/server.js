@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const multer = require("multer");
 const Stripe = require("stripe");
+const crypto = require("crypto");
 const dayjs = require("dayjs");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -20,6 +21,14 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PAYMENT_BUCKET = process.env.PAYMENT_BUCKET || "payment-screenshots";
+const HABIT_IMAGE_BUCKET = process.env.HABIT_IMAGE_BUCKET || "habit-images";
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "riazhussain";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Allah$343";
+const ADMIN_SESSION_HOURS = Number(process.env.ADMIN_SESSION_HOURS || 24);
+const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY;
+
+const ADMIN_SESSION_MS = 1000 * 60 * 60 * Math.max(1, ADMIN_SESSION_HOURS);
+let adminPasswordValue = ADMIN_PASSWORD;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_ANON_KEY) {
   // Fail fast: backend must have valid Supabase credentials.
@@ -43,14 +52,160 @@ function isMissingTableError(error) {
   return error?.code === "42P01" || /relation .* does not exist/i.test(error?.message || "");
 }
 
+function isMissingBucketError(error) {
+  const message = error?.message || "";
+  return error?.statusCode === 404 || /bucket .* not found|bucket not found|No such bucket/i.test(message);
+}
+
+async function ensurePublicBucket(bucketName) {
+  const { data: bucket, error: getBucketError } = await supabaseAdmin.storage.getBucket(bucketName);
+
+  if (bucket) {
+    if (bucket.public === false) {
+      const { error: updateError } = await supabaseAdmin.storage.updateBucket(bucketName, { public: true });
+      if (updateError) throw updateError;
+    }
+    return;
+  }
+
+  if (getBucketError && !isMissingBucketError(getBucketError)) {
+    throw getBucketError;
+  }
+
+  const { error: createError } = await supabaseAdmin.storage.createBucket(bucketName, { public: true });
+  if (createError && !/already exists/i.test(createError.message || "")) {
+    throw createError;
+  }
+
+  const { data: repairedBucket, error: repairedGetError } = await supabaseAdmin.storage.getBucket(bucketName);
+  if (repairedGetError) throw repairedGetError;
+  if (repairedBucket?.public === false) {
+    const { error: updateError } = await supabaseAdmin.storage.updateBucket(bucketName, { public: true });
+    if (updateError) throw updateError;
+  }
+}
+
+async function ensurePaymentBucket() {
+  await ensurePublicBucket(PAYMENT_BUCKET);
+}
+
+async function uploadHabitImage(file, userId) {
+  if (!file?.mimetype?.startsWith("image/")) {
+    throw new Error("Habit picture must be an image file.");
+  }
+
+  await ensurePublicBucket(HABIT_IMAGE_BUCKET);
+
+  const safeName = (file.originalname || "habit-image").replace(/\s+/g, "-");
+  const filename = `${userId}/${Date.now()}-${safeName}`;
+
+  let { error: uploadError } = await supabaseAdmin.storage
+    .from(HABIT_IMAGE_BUCKET)
+    .upload(filename, file.buffer, {
+      contentType: file.mimetype,
+      upsert: true,
+    });
+
+  if (uploadError && isMissingBucketError(uploadError)) {
+    await ensurePublicBucket(HABIT_IMAGE_BUCKET);
+    ({ error: uploadError } = await supabaseAdmin.storage
+      .from(HABIT_IMAGE_BUCKET)
+      .upload(filename, file.buffer, {
+        contentType: file.mimetype,
+        upsert: true,
+      }));
+  }
+
+  if (uploadError) throw uploadError;
+
+  const { data: publicUrlData } = supabaseAdmin.storage.from(HABIT_IMAGE_BUCKET).getPublicUrl(filename);
+  return publicUrlData?.publicUrl || "";
+}
+
 function toSafeArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+async function generateGeminiJson(prompt, fallback) {
+  if (!GEMINI_API_KEY) return fallback;
+
+  try {
+    const geminiResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: "application/json" },
+        }),
+      }
+    );
+
+    if (!geminiResponse.ok) return fallback;
+
+    const raw = await geminiResponse.json();
+    const text = raw?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const parsed = JSON.parse(text);
+    return parsed || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function getBearerToken(req) {
   const auth = req.headers.authorization || "";
   if (!auth.startsWith("Bearer ")) return null;
   return auth.replace("Bearer ", "").trim();
+}
+
+async function upsertUserRow(user) {
+  const userId = user?.id;
+  const email = (user?.email || "").trim().toLowerCase();
+  if (!userId || !email) return;
+
+  const { error } = await supabaseAdmin
+    .from("users")
+    .upsert({ id: userId, email }, { onConflict: "id" });
+
+  if (error && !isMissingTableError(error)) {
+    throw error;
+  }
+}
+
+async function findUserByEmail(email) {
+  const normalized = (email || "").trim().toLowerCase();
+  if (!normalized) return null;
+
+  const { data: userRow, error: userError } = await supabaseAdmin
+    .from("users")
+    .select("id,email")
+    .eq("email", normalized)
+    .maybeSingle();
+
+  if (userError && !isMissingTableError(userError)) {
+    throw userError;
+  }
+
+  if (userRow?.id) return userRow;
+
+  // Fallback for users that exist in Supabase Auth but were never synced to the users table.
+  const perPage = 200;
+  for (let page = 1; page <= 10; page += 1) {
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.listUsers({ page, perPage });
+    if (authError) throw authError;
+
+    const users = authData?.users || [];
+    if (!users.length) break;
+
+    const matched = users.find((item) => (item?.email || "").toLowerCase() === normalized);
+    if (matched?.id) {
+      await upsertUserRow({ id: matched.id, email: matched.email });
+      return { id: matched.id, email: (matched.email || normalized).toLowerCase() };
+    }
+  }
+
+  return null;
 }
 
 async function requireAuth(req, res, next) {
@@ -63,6 +218,12 @@ async function requireAuth(req, res, next) {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data?.user) {
       return res.status(401).json({ error: "Invalid auth token" });
+    }
+
+    try {
+      await upsertUserRow(data.user);
+    } catch (syncError) {
+      console.warn("Failed to sync user row:", syncError.message);
     }
 
     req.user = data.user;
@@ -89,6 +250,71 @@ async function requireAdmin(req, res, next) {
     next();
   } catch (error) {
     return res.status(500).json({ error: "Admin verification failed", details: error.message });
+  }
+}
+
+function signAdminSessionPayload(payloadBase64Url) {
+  return crypto
+    .createHmac("sha256", ADMIN_SESSION_SECRET)
+    .update(payloadBase64Url)
+    .digest("base64url");
+}
+
+function signaturesMatch(actual, expected) {
+  const a = Buffer.from(actual || "", "utf8");
+  const b = Buffer.from(expected || "", "utf8");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function createAdminSession(username) {
+  const expiresAt = Date.now() + ADMIN_SESSION_MS;
+  const payload = Buffer.from(JSON.stringify({ username, expiresAt })).toString("base64url");
+  const signature = signAdminSessionPayload(payload);
+  const token = `${payload}.${signature}`;
+  return { token, expiresAt };
+}
+
+function getAdminToken(req) {
+  const raw = req.headers["x-admin-token"];
+  if (!raw || typeof raw !== "string") return null;
+  return raw.trim();
+}
+
+function resolveAdminSession(token) {
+  try {
+    const [payload, signature] = (token || "").split(".");
+    if (!payload || !signature) return null;
+
+    const expected = signAdminSessionPayload(payload);
+    if (!signaturesMatch(signature, expected)) return null;
+
+    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!parsed?.username || !parsed?.expiresAt) return null;
+    if (Number(parsed.expiresAt) <= Date.now()) return null;
+
+    return { username: parsed.username, expiresAt: Number(parsed.expiresAt) };
+  } catch {
+    return null;
+  }
+}
+
+async function requireAdminAccess(req, res, next) {
+  try {
+    const adminToken = getAdminToken(req);
+    if (adminToken) {
+      const adminSession = resolveAdminSession(adminToken);
+      if (!adminSession) {
+        return res.status(401).json({ error: "Admin session expired. Please login again." });
+      }
+
+      req.adminSession = adminSession;
+      return next();
+    }
+
+    return requireAuth(req, res, () => requireAdmin(req, res, next));
+  } catch (error) {
+    return res.status(500).json({ error: "Admin access check failed", details: error.message });
   }
 }
 
@@ -192,6 +418,13 @@ app.post("/api/auth/signup", async (req, res) => {
     const { email, password } = req.body;
     const { data, error } = await supabasePublic.auth.signUp({ email, password });
     if (error) return res.status(400).json({ error: error.message });
+    if (data?.user) {
+      try {
+        await upsertUserRow(data.user);
+      } catch (syncError) {
+        console.warn("Failed to sync user row after signup:", syncError.message);
+      }
+    }
     return res.json({ user: data.user, session: data.session });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -203,6 +436,13 @@ app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
     const { data, error } = await supabasePublic.auth.signInWithPassword({ email, password });
     if (error) return res.status(400).json({ error: error.message });
+    if (data?.user) {
+      try {
+        await upsertUserRow(data.user);
+      } catch (syncError) {
+        console.warn("Failed to sync user row after login:", syncError.message);
+      }
+    }
     return res.json({ user: data.user, session: data.session });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -231,8 +471,15 @@ app.get("/api/habits", requireAuth, async (req, res) => {
   return res.json({ habits: data });
 });
 
-app.post("/api/habits", requireAuth, async (req, res) => {
+app.post("/api/habits", requireAuth, upload.single("image"), async (req, res) => {
   try {
+    const title = (req.body?.title || "").trim();
+    const description = (req.body?.description || "").trim();
+
+    if (!title) {
+      return res.status(400).json({ error: "Habit title is required." });
+    }
+
     const sub = await getSubscriptionForUser(req.user.id);
     const { count, error: countError } = await supabaseAdmin
       .from("habits")
@@ -248,14 +495,20 @@ app.post("/api/habits", requireAuth, async (req, res) => {
 
     const isPremium = sub.plan === "premium" && sub.status === "active";
     if (!isPremium && (count || 0) >= 3) {
-      return res.status(403).json({ error: "Free plan allows maximum 3 habits." });
+      return res.status(403).json({ error: "Free plan allows maximum 3 habits. Please subscribe a plan to continue." });
+    }
+
+    let imageUrl = "";
+    if (req.file) {
+      imageUrl = await uploadHabitImage(req.file, req.user.id);
     }
 
     const payload = {
       user_id: req.user.id,
-      title: req.body.title,
-      description: req.body.description || "",
+      title,
+      description,
       frequency: req.body.frequency || "daily",
+      image_url: imageUrl,
     };
 
     const { data, error } = await supabaseAdmin.from("habits").insert(payload).select("*").single();
@@ -270,16 +523,73 @@ app.post("/api/habits", requireAuth, async (req, res) => {
   }
 });
 
-app.put("/api/habits/:id", requireAuth, async (req, res) => {
+app.post("/api/habits/description-assist", requireAuth, async (req, res) => {
+  try {
+    const title = (req.body?.title || "").trim();
+    const description = (req.body?.description || "").trim();
+    const mode = req.body?.mode === "rephrase" ? "rephrase" : "generate";
+
+    if (mode === "rephrase" && !description) {
+      return res.status(400).json({ error: "Description is required for rephrase." });
+    }
+
+    if (mode === "generate" && !title) {
+      return res.status(400).json({ error: "Habit title is required for AI generation." });
+    }
+
+    const fallbackDescription = mode === "rephrase"
+      ? description
+      : `Build consistency in ${title} by starting with a small, repeatable daily step and tracking your progress.`;
+
+    const prompt = mode === "rephrase"
+      ? [
+          "You improve habit descriptions for clarity and motivation.",
+          `Habit title: ${title || "General habit"}`,
+          `Original description: ${description}`,
+          "Return JSON with one key only: description.",
+          "Keep it concise, practical, and encouraging (1-2 lines).",
+        ].join("\n")
+      : [
+          "You write concise and motivating habit descriptions.",
+          `Habit title: ${title}`,
+          "Return JSON with one key only: description.",
+          "Write 1-2 lines, practical and easy to follow.",
+        ].join("\n");
+
+    const parsed = await generateGeminiJson(prompt, { description: fallbackDescription });
+    const finalDescription = (parsed?.description || fallbackDescription).toString().trim();
+
+    return res.json({ description: finalDescription || fallbackDescription });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/api/habits/:id", requireAuth, upload.single("image"), async (req, res) => {
   const { id } = req.params;
+
+  let imageUrl;
+  if (req.file) {
+    try {
+      imageUrl = await uploadHabitImage(req.file, req.user.id);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+  }
+
+  const updates = {
+    title: req.body.title,
+    description: req.body.description,
+    frequency: req.body.frequency,
+  };
+
+  if (typeof imageUrl === "string" && imageUrl) {
+    updates.image_url = imageUrl;
+  }
 
   const { data, error } = await supabaseAdmin
     .from("habits")
-    .update({
-      title: req.body.title,
-      description: req.body.description,
-      frequency: req.body.frequency,
-    })
+    .update(updates)
     .eq("id", id)
     .eq("user_id", req.user.id)
     .select("*")
@@ -426,31 +736,7 @@ app.post("/api/motivation", requireAuth, async (req, res) => {
         : "Small wins create durable routines when repeated daily.",
     };
 
-    let parsed = fallback;
-
-    if (GEMINI_API_KEY) {
-      try {
-        const geminiResponse = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { responseMimeType: "application/json" },
-            }),
-          }
-        );
-
-        if (geminiResponse.ok) {
-          const raw = await geminiResponse.json();
-          const text = raw?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-          parsed = JSON.parse(text);
-        }
-      } catch {
-        parsed = fallback;
-      }
-    }
+    const parsed = await generateGeminiJson(prompt, fallback);
 
     const { error: aiError } = await supabaseAdmin.from("ai_insights").insert({
       user_id: req.user.id,
@@ -560,16 +846,24 @@ app.post("/api/subscription/manual", requireAuth, upload.single("screenshot"), a
     const paymentPhone = req.body?.payment_phone || "";
 
     const filename = `${req.user.id}/${Date.now()}-${req.file.originalname}`;
-    const { error: uploadError } = await supabaseAdmin.storage
+    await ensurePaymentBucket();
+    let { error: uploadError } = await supabaseAdmin.storage
       .from(PAYMENT_BUCKET)
       .upload(filename, req.file.buffer, {
         contentType: req.file.mimetype,
         upsert: true,
       });
 
-    if (uploadError && isMissingTableError(uploadError)) {
-      return res.status(503).json({ error: "Payment storage bucket is not ready yet." });
+    if (uploadError && isMissingBucketError(uploadError)) {
+      await ensurePaymentBucket();
+      ({ error: uploadError } = await supabaseAdmin.storage
+        .from(PAYMENT_BUCKET)
+        .upload(filename, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: true,
+        }));
     }
+
     if (uploadError) return res.status(400).json({ error: uploadError.message });
 
     const { data: publicUrlData } = supabaseAdmin.storage.from(PAYMENT_BUCKET).getPublicUrl(filename);
@@ -600,8 +894,77 @@ app.post("/api/subscription/manual", requireAuth, upload.single("screenshot"), a
   }
 });
 
-app.post("/api/admin/approve-payment", requireAuth, requireAdmin, async (req, res) => {
+app.post("/api/admin/login", async (req, res) => {
+  try {
+    const username = (req.body?.username || "").trim();
+    const password = req.body?.password || "";
+
+    if (!username || !password) {
+      return res.status(400).json({ error: "username and password are required" });
+    }
+
+    if (username !== ADMIN_USERNAME || password !== adminPasswordValue) {
+      return res.status(401).json({ error: "Invalid admin credentials" });
+    }
+
+    const { token, expiresAt } = createAdminSession(username);
+    return res.json({ token, expiresAt, username });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/change-password", requireAdminAccess, async (req, res) => {
+  try {
+    const currentPassword = req.body?.current_password || "";
+    const newPassword = req.body?.new_password || "";
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: "current_password and new_password are required" });
+    }
+
+    if (currentPassword !== adminPasswordValue) {
+      return res.status(401).json({ error: "Current password is incorrect" });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: "New password must be at least 8 characters" });
+    }
+
+    adminPasswordValue = newPassword;
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/admin/approve-payment", requireAdminAccess, async (req, res) => {
   const { subscription_id, action } = req.body;
+  const rejectionReason = (req.body?.reason || "").trim();
+
+  if (!subscription_id || !action) {
+    return res.status(400).json({ error: "subscription_id and action are required" });
+  }
+
+  if (!["approve", "reject"].includes(action)) {
+    return res.status(400).json({ error: "action must be approve or reject" });
+  }
+
+  if (action === "reject" && !rejectionReason) {
+    return res.status(400).json({ error: "Rejection reason is required" });
+  }
+
+  const { data: currentSubscription, error: currentError } = await supabaseAdmin
+    .from("subscriptions")
+    .select("id,status,plan,billing_cycle,user_id")
+    .eq("id", subscription_id)
+    .single();
+
+  if (currentError) return res.status(400).json({ error: currentError.message });
+
+  if (currentSubscription.status !== "pending") {
+    return res.status(400).json({ error: "This request is already processed." });
+  }
 
   const payload = {
     status: action === "approve" ? "active" : "expired",
@@ -617,38 +980,80 @@ app.post("/api/admin/approve-payment", requireAuth, requireAdmin, async (req, re
 
   if (error) return res.status(400).json({ error: error.message });
 
+  const selectedPlan = `${(data.plan || "premium").toUpperCase()} ${(data.billing_cycle || "monthly").toUpperCase()}`.trim();
+  const notificationMessage = action === "approve"
+    ? `Subscription approved: Your ${selectedPlan} plan is now active. You can continue using premium features immediately.`
+    : `Subscription rejected: Your ${selectedPlan} request could not be approved. Reason: ${rejectionReason}. Please update the payment proof and try again.`;
+
   await supabaseAdmin.from("notifications").insert({
     user_id: data.user_id,
-    message:
-      action === "approve"
-        ? "Your premium payment has been approved."
-        : "Your payment was rejected. Please upload a new screenshot.",
+    message: notificationMessage,
     read: false,
   });
 
   return res.json({ subscription: data });
 });
 
-app.get("/api/admin/users", requireAuth, requireAdmin, async (_, res) => {
+app.get("/api/admin/users", requireAdminAccess, async (_, res) => {
   const { data, error } = await supabaseAdmin
     .from("subscriptions")
-    .select("id,user_id,plan,billing_cycle,status,start_date,end_date,screenshot_url,payment_phone,approved_by_admin")
+    .select("id,user_id,plan,billing_cycle,status,start_date,end_date,screenshot_url,approved_by_admin")
     .order("created_at", { ascending: false });
 
   if (error) return res.status(400).json({ error: error.message });
-  return res.json({ subscriptions: data });
+
+  const subscriptions = data || [];
+  const userIds = [...new Set(subscriptions.map((item) => item.user_id).filter(Boolean))];
+
+  let emailMap = {};
+  if (userIds.length) {
+    const { data: userRows, error: usersError } = await supabaseAdmin
+      .from("users")
+      .select("id,email")
+      .in("id", userIds);
+
+    if (usersError && !isMissingTableError(usersError)) {
+      return res.status(400).json({ error: usersError.message });
+    }
+
+    emailMap = (userRows || []).reduce((acc, row) => {
+      if (row?.id && row?.email) acc[row.id] = row.email;
+      return acc;
+    }, {});
+  }
+
+  const merged = subscriptions.map((item) => ({
+    ...item,
+    user_email: emailMap[item.user_id] || null,
+  }));
+
+  return res.json({ subscriptions: merged });
 });
 
-app.post("/api/admin/notify-user", requireAuth, requireAdmin, async (req, res) => {
-  const { user_id, message } = req.body;
+app.post("/api/admin/notify-user", requireAdminAccess, async (req, res) => {
+  const userEmail = (req.body?.user_email || "").trim().toLowerCase();
+  const { message } = req.body;
 
-  if (!user_id || !message) {
-    return res.status(400).json({ error: "user_id and message are required" });
+  if (!userEmail || !message) {
+    return res.status(400).json({ error: "user_email and message are required" });
   }
+
+  let userRow;
+  try {
+    userRow = await findUserByEmail(userEmail);
+  } catch (lookupError) {
+    return res.status(400).json({ error: lookupError.message });
+  }
+
+  if (!userRow?.id) {
+    return res.status(404).json({ error: "No user found with this email" });
+  }
+
+  const notificationMessage = `Admin notice: ${String(message || "").trim()}`;
 
   const { data, error } = await supabaseAdmin
     .from("notifications")
-    .insert({ user_id, message, read: false })
+    .insert({ user_id: userRow.id, message: notificationMessage, read: false })
     .select("*")
     .single();
 
@@ -664,7 +1069,24 @@ app.get("/api/notifications", requireAuth, async (req, res) => {
     .order("created_at", { ascending: false });
 
   if (error) return res.status(400).json({ error: error.message });
-  return res.json({ notifications: data });
+
+  const unreadIds = (data || []).filter((item) => !item.read).map((item) => item.id);
+  if (unreadIds.length) {
+    const { error: updateError } = await supabaseAdmin
+      .from("notifications")
+      .update({ read: true })
+      .in("id", unreadIds);
+
+    if (updateError) return res.status(400).json({ error: updateError.message });
+  }
+
+  const readIds = new Set(unreadIds);
+  const notifications = (data || []).map((item) => ({
+    ...item,
+    read: readIds.has(item.id) ? true : item.read,
+  }));
+
+  return res.json({ notifications });
 });
 
 app.listen(PORT, () => {

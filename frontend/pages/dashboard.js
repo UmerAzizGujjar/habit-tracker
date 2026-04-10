@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
-import Link from "next/link";
 import dayjs from "dayjs";
 import toast from "react-hot-toast";
 import { motion } from "framer-motion";
@@ -10,8 +9,96 @@ import HabitForm from "@/components/HabitForm";
 import HabitList from "@/components/HabitList";
 import QuoteCard from "@/components/QuoteCard";
 import AnalyticsCharts from "@/components/AnalyticsCharts";
+import UpgradePromptModal from "@/components/UpgradePromptModal";
 import api from "@/lib/apiClient";
 import { supabase } from "@/lib/supabaseClient";
+
+const quoteBank = [
+  {
+    quote: "Small actions repeated daily build the strongest identity.",
+    habit_suggestion: "Choose one action you can repeat without resistance.",
+    insight: "Consistency grows when the habit feels easy to start.",
+  },
+  {
+    quote: "Progress becomes visible when effort stops depending on mood.",
+    habit_suggestion: "Use a fixed trigger like after breakfast.",
+    insight: "Stable cues reduce friction and protect momentum.",
+  },
+  {
+    quote: "A streak is a system, not a mood.",
+    habit_suggestion: "Keep the task short enough to never feel heavy.",
+    insight: "Systems win when they are simple, repeatable, and measurable.",
+  },
+  {
+    quote: "Discipline is built in the moments nobody notices.",
+    habit_suggestion: "Protect the habit even on low-energy days.",
+    insight: "Quiet days are the days that shape the final result.",
+  },
+];
+
+function getOverviewNotificationTheme(message) {
+  const text = (message || "").toLowerCase();
+
+  if (text.includes("reject") || text.includes("declin") || text.includes("expired")) {
+    return {
+      kind: "rejected",
+      label: "Rejected",
+      card: "border-rose-200 bg-rose-50/70",
+      title: "text-rose-900",
+      meta: "text-rose-700",
+      badge: "bg-rose-100 text-rose-700",
+      iconBg: "bg-rose-100",
+      iconFg: "text-rose-700",
+    };
+  }
+
+  if (text.includes("approved") || text.includes("active") || text.includes("success")) {
+    return {
+      kind: "approved",
+      label: "Approved",
+      card: "border-emerald-200 bg-emerald-50/70",
+      title: "text-emerald-900",
+      meta: "text-emerald-700",
+      badge: "bg-emerald-100 text-emerald-700",
+      iconBg: "bg-emerald-100",
+      iconFg: "text-emerald-700",
+    };
+  }
+
+  return {
+    kind: "update",
+    label: "Update",
+    card: "border-sky-200 bg-sky-50/70",
+    title: "text-sky-900",
+    meta: "text-sky-700",
+    badge: "bg-sky-100 text-sky-700",
+    iconBg: "bg-sky-100",
+    iconFg: "text-sky-700",
+  };
+}
+
+function OverviewNotificationIcon({ kind, iconBg, iconFg }) {
+  return (
+    <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${iconBg} ${iconFg}`}>
+      {kind === "rejected" ? (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : null}
+      {kind === "approved" ? (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+          <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : null}
+      {kind === "update" ? (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4" aria-hidden="true">
+          <path d="M12 8h.01M12 12v4" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="12" cy="12" r="9" />
+        </svg>
+      ) : null}
+    </span>
+  );
+}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -21,11 +108,15 @@ export default function DashboardPage() {
   const [logs, setLogs] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [notifications, setNotifications] = useState([]);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [ai, setAi] = useState({
     quote: "Discipline is your daily contract with your future self.",
     habit_suggestion: "Stack a small habit after breakfast.",
     insight: "Start tiny, stay consistent, then scale.",
   });
+  const quoteRefreshIndexRef = useRef(0);
+  const currentQuoteRef = useRef("Discipline is your daily contract with your future self.");
+  const missedTodayRef = useRef(false);
 
   const logsByHabit = useMemo(() => {
     const mapped = {};
@@ -86,16 +177,31 @@ export default function DashboardPage() {
 
   const fetchAi = useCallback(async () => {
     try {
-      const missedToday = habits.length > 0 && habits.some((h) => logsByHabit[h.id]?.[dayjs().format("YYYY-MM-DD")] !== "completed");
-      const { data } = await api.post("/api/motivation", { emotion: "focused", missedHabit: missedToday });
+      const { data } = await api.post("/api/motivation", { emotion: "focused", missedHabit: missedTodayRef.current });
+      const incomingQuote = data?.quote || "";
+      const shouldRotate = !incomingQuote || incomingQuote === currentQuoteRef.current;
+
+      if (shouldRotate) {
+        const fallback = quoteBank[quoteRefreshIndexRef.current % quoteBank.length];
+        quoteRefreshIndexRef.current += 1;
+        currentQuoteRef.current = fallback.quote;
+        setAi(fallback);
+        return;
+      }
+
+      currentQuoteRef.current = incomingQuote;
       setAi(data);
     } catch {
-      setAi({
-        quote: "Small improvements, repeated daily, compound into measurable outcomes.",
-        habit_suggestion: "Choose one habit that is easy to repeat today.",
-        insight: "AI insight is temporarily unavailable, but the workflow remains intact.",
-      });
+      const fallback = quoteBank[quoteRefreshIndexRef.current % quoteBank.length];
+      quoteRefreshIndexRef.current += 1;
+      currentQuoteRef.current = fallback.quote;
+      setAi(fallback);
     }
+  }, []);
+
+  useEffect(() => {
+    const today = dayjs().format("YYYY-MM-DD");
+    missedTodayRef.current = habits.length > 0 && habits.some((h) => logsByHabit[h.id]?.[today] !== "completed");
   }, [habits, logsByHabit]);
 
   useEffect(() => {
@@ -108,22 +214,49 @@ export default function DashboardPage() {
       try {
         setUser(data.session.user);
         await loadAll();
-        await fetchAi();
       } finally {
         setLoading(false);
       }
     };
 
     boot();
-  }, [fetchAi, loadAll, router]);
+  }, [loadAll, router]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    fetchAi();
+    const intervalId = window.setInterval(() => {
+      fetchAi();
+    }, 30000);
+
+    return () => window.clearInterval(intervalId);
+  }, [user, fetchAi]);
 
   const handleCreateHabit = async (payload) => {
     try {
-      await api.post("/api/habits", payload);
+      const formData = new FormData();
+      formData.append("title", payload.title || "");
+      formData.append("description", payload.description || "");
+      formData.append("frequency", payload.frequency || "daily");
+      if (payload.imageFile) {
+        formData.append("image", payload.imageFile);
+      }
+
+      await api.post("/api/habits", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
       toast.success("Habit added");
       await loadAll();
+      return true;
     } catch (error) {
+      if (error?.response?.status === 403) {
+        setShowUpgradeModal(true);
+        toast.error("Free plan reached. Upgrade to add more habits.");
+        return false;
+      }
       toast.error(error?.response?.data?.error || "Could not create habit");
+      return false;
     }
   };
 
@@ -161,6 +294,8 @@ export default function DashboardPage() {
   }, 0);
   const todayTotal = habits.length;
   const todayRate = todayTotal ? Math.round((todayCompleted / todayTotal) * 100) : 0;
+  const visibleHabits = habits; // Show all habits
+  const visibleNotifications = notifications; // Show all notifications
 
   return (
     <AppShell
@@ -169,13 +304,6 @@ export default function DashboardPage() {
       active="/dashboard"
       title="Operations Dashboard"
       subtitle="Daily overview"
-      rightSlot={
-        <div className="flex flex-wrap gap-2">
-          <Link href="/habits" className="btn btn-ghost text-sm">Manage Habits</Link>
-          <Link href="/insights" className="btn btn-ghost text-sm">Analytics</Link>
-          <Link href="/quotes" className="btn btn-ghost text-sm">AI Quotes</Link>
-        </div>
-      }
     >
       {loading ? (
         <div className="surface p-6 mb-4">Loading dashboard...</div>
@@ -212,31 +340,78 @@ export default function DashboardPage() {
           </motion.div>
         </div>
       </section>
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-1 xl:grid-cols-[1.55fr_1fr] gap-4">
-        <div className="space-y-4">
-          <HabitForm onCreate={handleCreateHabit} />
-          <HabitList habits={habits} logsByHabit={logsByHabit} onToggleComplete={handleToggle} onDelete={handleDeleteHabit} />
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="grid grid-cols-1 xl:grid-cols-2 gap-4 items-stretch">
+        <HabitForm onCreate={handleCreateHabit} className="min-w-0" />
+
+        <QuoteCard
+          quote={ai.quote}
+          suggestion={ai.habit_suggestion}
+          insight={ai.insight}
+          onRefresh={fetchAi}
+          className="min-w-0"
+            todayCompleted={todayCompleted}
+            todayTotal={todayTotal || 0}
+            todayRate={todayRate}
+            currentStreak={analytics?.overview?.currentStreak || 0}
+        />
+
+        <div className="surface p-4 md:p-6 h-full min-w-0">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <h3 className="text-lg font-semibold">Today&apos;s Habits</h3>
+              <p className="text-sm text-stone-500 mt-1">Scroll to view more habits</p>
+            </div>
+          </div>
+          <div className="max-h-96 overflow-y-auto pr-1">
+            <HabitList
+              habits={habits}
+              logsByHabit={logsByHabit}
+              onToggleComplete={handleToggle}
+              onDelete={handleDeleteHabit}
+              className="min-w-0"
+              bare
+            />
+          </div>
         </div>
 
-        <div className="space-y-4">
-          <QuoteCard
-            quote={ai.quote}
-            suggestion={ai.habit_suggestion}
-            insight={ai.insight}
-            onRefresh={fetchAi}
-          />
-          <div className="surface p-4 md:p-6">
-            <h3 className="text-lg font-semibold mb-3">Notifications</h3>
-            <div className="space-y-2 text-sm">
-              {notifications.length ? notifications.map((n) => (
-                <p key={n.id} className="notice-item">{n.message}</p>
-              )) : <p className="text-stone-600">No notifications.</p>}
+        <div className="surface p-4 md:p-6 h-full min-w-0">
+          <div className="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <h3 className="text-lg font-semibold">Notifications</h3>
+              <p className="text-sm text-stone-500 mt-1">Scroll to view more notifications</p>
             </div>
+          </div>
+
+          <div className="max-h-96 overflow-y-auto pr-1 space-y-3">
+            {notifications.length ? notifications.map((notification) => {
+              const theme = getOverviewNotificationTheme(notification.message);
+              return (
+                <div key={notification.id} className={`rounded-2xl border p-4 flex items-start justify-between gap-4 ${theme.card}`}>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <OverviewNotificationIcon kind={theme.kind} iconBg={theme.iconBg} iconFg={theme.iconFg} />
+                      <span className={`text-xs font-semibold uppercase tracking-wide ${theme.meta}`}>{theme.label}</span>
+                    </div>
+                    <p className={`font-semibold leading-relaxed ${theme.title}`}>{notification.message}</p>
+                    <p className={`text-xs mt-1 ${theme.meta}`}>{dayjs(notification.created_at).format("DD MMM YYYY, h:mm A")}</p>
+                  </div>
+                </div>
+              );
+            }) : <p className="text-stone-600">No notifications.</p>}
           </div>
         </div>
       </motion.div>
 
       <AnalyticsCharts analytics={analytics} compact />
+
+      <UpgradePromptModal
+        open={showUpgradeModal}
+        onClose={() => setShowUpgradeModal(false)}
+        onUpgrade={() => {
+          setShowUpgradeModal(false);
+          router.push("/subscription");
+        }}
+      />
 
       <Footer />
     </AppShell>

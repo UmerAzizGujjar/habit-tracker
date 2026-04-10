@@ -50,6 +50,35 @@ export default function BadgesPage() {
     >
       {loading ? <div className="surface p-6">Loading badges...</div> : null}
 
+      <section className="surface p-5 md:p-6 relative overflow-hidden">
+        <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_right,rgba(183,131,41,0.14),transparent_30%),radial-gradient(circle_at_bottom_left,rgba(95,107,110,0.10),transparent_28%)]" />
+        <div className="relative flex flex-col lg:flex-row lg:items-end lg:justify-between gap-5">
+          <div className="max-w-3xl">
+            <p className="text-[11px] uppercase tracking-[0.28em] text-stone-500 font-semibold">Badge progress</p>
+            <h3 className="mt-2 text-2xl md:text-4xl font-semibold tracking-tight text-stone-900">
+              Unlock streak awards with clean, visible milestones.
+            </h3>
+            <p className="mt-3 text-sm md:text-base text-stone-600 leading-relaxed max-w-2xl">
+              Each badge is a visual milestone for consistency. Tap any badge to view its meaning, target, and progress toward the next reward.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full">
+            <div className="rounded-[20px] border border-stone-200 bg-white/85 p-4 text-center">
+              <p className="text-[10px] uppercase tracking-[0.22em] text-stone-500">Current streak</p>
+              <p className="mt-1 text-2xl font-semibold text-stone-900">{analytics?.overview?.currentStreak || 0}</p>
+            </div>
+            <div className="rounded-[20px] border border-stone-200 bg-white/85 p-4 text-center">
+              <p className="text-[10px] uppercase tracking-[0.22em] text-stone-500">Longest</p>
+              <p className="mt-1 text-2xl font-semibold text-stone-900">{analytics?.overview?.longestStreak || 0}</p>
+            </div>
+            <div className="rounded-[20px] border border-stone-200 bg-white/85 p-4 text-center">
+              <p className="text-[10px] uppercase tracking-[0.22em] text-stone-500">Badges</p>
+              <p className="mt-1 text-2xl font-semibold text-stone-900">7</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <div className="grid xl:grid-cols-[0.95fr_1.05fr] gap-4">
         <SectionCard title="Progress Summary" subtitle="Your current status">
           <div className="space-y-4 text-sm text-stone-700">
@@ -67,7 +96,7 @@ export default function BadgesPage() {
                 <p className="mt-1 text-xl font-semibold text-stone-900">{habits}</p>
               </div>
             </div>
-            <div className="rounded-[22px] border border-[var(--accent)]/35 bg-[linear-gradient(180deg,#fff9ec_0%,#fff4dc_100%)] p-4">
+            <div className="rounded-[22px] border border-(--accent)/35 bg-[linear-gradient(180deg,#fff9ec_0%,#fff4dc_100%)] p-4">
               <p className="text-[11px] uppercase tracking-[0.24em] text-stone-500">Badge status</p>
               <p className="mt-2 text-base font-semibold text-stone-900">{badgeSummary}</p>
               <p className="mt-1 text-sm text-stone-600">Earn more badges by extending your streak with daily consistency.</p>
