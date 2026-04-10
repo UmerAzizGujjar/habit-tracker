@@ -14,6 +14,11 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 const PORT = Number(process.env.PORT || 4000);
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const FRONTEND_URLS = (process.env.FRONTEND_URLS || FRONTEND_URL)
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const PRIMARY_FRONTEND_URL = FRONTEND_URLS[0] || "http://localhost:3000";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
@@ -45,7 +50,15 @@ const supabasePublic = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
-app.use(cors({ origin: FRONTEND_URL, credentials: true }));
+app.use(cors({
+  origin(origin, callback) {
+    // Allow server-to-server requests and tools that do not send an Origin header.
+    if (!origin) return callback(null, true);
+    if (FRONTEND_URLS.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: "8mb" }));
 
 function isMissingTableError(error) {
@@ -795,8 +808,8 @@ app.post("/api/subscription/stripe", requireAuth, async (req, res) => {
           quantity: 1,
         },
       ],
-      success_url: `${FRONTEND_URL}/dashboard?payment=success`,
-      cancel_url: `${FRONTEND_URL}/dashboard?payment=cancelled`,
+      success_url: `${PRIMARY_FRONTEND_URL}/dashboard?payment=success`,
+      cancel_url: `${PRIMARY_FRONTEND_URL}/dashboard?payment=cancelled`,
       metadata: { user_id: req.user.id, billing_cycle: billingCycle },
     });
 
