@@ -40,7 +40,7 @@ export default function InsightsPage() {
       {loading ? <div className="surface p-6">Loading insights...</div> : null}
       <div className="space-y-4">
         <AnalyticsCharts analytics={analytics} />
-        <div className="grid xl:grid-cols-[1fr_0.75fr] gap-4">
+        <div className="grid xl:grid-cols-[0.82fr_1.18fr] gap-4">
           <SectionCard title="AI Summary" subtitle="Behavior analysis">
             <div className="space-y-3 text-sm text-stone-700">
               <p>Current streak: <strong>{analytics.overview.currentStreak}</strong></p>
